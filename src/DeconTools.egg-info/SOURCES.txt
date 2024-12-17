@@ -1,7 +1,0 @@
-pyproject.toml
-setup.py
-src/DeconTools.egg-info/PKG-INFO
-src/DeconTools.egg-info/SOURCES.txt
-src/DeconTools.egg-info/dependency_links.txt
-src/DeconTools.egg-info/requires.txt
-src/DeconTools.egg-info/top_level.txt
