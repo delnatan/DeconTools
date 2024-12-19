@@ -18,205 +18,100 @@ class MicroscopeParameters:
     pixel_size: float  # in micrometers
 
 
-class PupilFunction:
-    """Class to handle pupil function calculations and manipulations"""
+def psf3d(
+    Nz: int,
+    Ny: int,
+    Nx: int,
+    dxy: float,
+    dz: float,
+    wvlen: float = 0.530,
+    NA: float = 1.4,
+    nobj: float = 1.4,
+    noil: float = 1.515,
+    N: int = 1024,
+    t: float = 0.0,
+):
+    """compute 3D PSF using a simplified (Gibson & Lanni) 2-layer model
 
-    def __init__(
-        self,
-        params: MicroscopeParameters,
-        Nx: int = 128,
-        Ny: int = 128,
-        oversampling=2,
-    ):
-        """
-        Initialize pupil function calculator
+    coverslip glass thickness layer is omitted. To mitigate boundary effect
+    from FFTs, PSFs should be computed at larger N before cropping it to the
+    desired / requested size (Nx and Ny). The 3D PSF can be computed with
+    different depth by varying the parameter `t`. This number sh
 
-        For zernike polynomial calculations, the quantities for the
-        radial coordinate ρ and angular coordinate ϕ are obtained from
+    Args:
+    -----
+    Nz : number of z slices
+    Ny : psf height
+    Nx : psf width
+    dxy: lateral pixel spacing, micron
+    dz : axial pixel spacing, micron
+    NA : numerical aperture
+    nobj: refractive index of object
+    noil: refractive index of immersion
+    N: number of samples used for computing oversampled PSF
+    t: distance of sample from coverslip, micron. Larger number means deeper
+       into the sample.
 
-        ρ = PupilFunction.R / (NA/λ_em) # only compute where ρ ∈ [0, 1]
-        ϕ = PupilFunction.Phi
+    """
+    # compute frequency grids in wavelength units
+    max_size = max(Ny, Nx)
 
-        Also, you can resample the pupil for computing PSFs with different
-        wavelength by scaling ρ × (λ₁ / λ₀) where λ₀ is the wavelength used
-        for the phase retrieval procedure
+    assert (
+        N > max_size
+    ), f"Number of samples must be larger than requested Ny or Nx"
 
-        Args:
-            params: MicroscopeParameters object
-            size: Size of pupil function array (default 512x512)
-        """
-        self.params = params
-        self.Ny = Ny
-        self.Nx = Nx
-        self._initialize_coordinates()
+    assert t >= 0, "distance of sample from coverslip can't be negative"
 
-    def _initialize_coordinates(self, use_excitation_wavelength=False):
-        """Initialize coordinate systems for calculations"""
-        x = fft.fftfreq(self.Nx, d=self.params.pixel_size)
-        y = fft.fftfreq(self.Ny, d=self.params.pixel_size)
-        self.Y, self.X = np.meshgrid(y, x, indexing="ij")
-        self.R = np.sqrt(self.X**2 + self.Y**2)
-        self.Phi = np.arctan2(self.Y, self.X)
+    fy = fft.fftfreq(N, d=dxy / wvlen)
+    fx = fft.fftfreq(N, d=dxy / wvlen)
+    Ky, Kx = np.meshgrid(fy, fx, indexing="ij")
 
-        if use_excitation_wavelength:
-            wavelength = self.params.excitation_wavelength
-        else:
-            wavelength = self.params.emission_wavelength
+    # ideal complex pupil
+    # band limit is at NA/wvlen on pupil plane
+    # on the OTF, the bandlimit is at 2 * NA/wvlen
+    R = np.sqrt(Kx**2 + Ky**2)
+    pupil = (R < NA) + 0j
 
-        # Create pupil mask based on NA
-        bandlimit = self.params.numerical_aperture / wavelength
-        self.mask = self.R <= bandlimit + 0j
+    # compute the angles of rays from object
+    sin_theta_obj = np.clip(R / nobj, -1, 1)
+    sin_theta_oil = np.clip(R / noil, -1, 1)
 
-        # compute compression factor 1/sqrt(cos(θ₁))
-        # on the objective lens side
-        sin_theta1 = np.clip(
-            wavelength / self.params.immersion_refractive_index * self.R,
-            -1,
-            1,
-        )
-        sin_theta2 = np.clip(
-            wavelength / self.params.sample_refractive_index * self.R,
-            -1,
-            1,
-        )
-        #          n_s           ||       n_i
-        #  (source) ∠θ₂ ----> refraction --> ∠θ₁
-        # angles of rays of light leaving the immersion, refracted from
-        # the sample upon 'seeing' immersion boundary
-        self.theta_1 = np.arcsin(sin_theta1)
+    theta_obj = np.arcsin(sin_theta_obj)
+    theta_oil = np.arcsin(sin_theta_oil)
 
-        # angles of rays of light from source (sample)
-        self.theta_2 = np.arcsin(sin_theta2)
+    # compute optical path lengths along optical axis
+    # sample depth from coverslip (t_s in G&L)
+    op_obj = t * nobj * np.cos(theta_obj)
 
-    def calculate_ideal_pupil(
-        self, use_excitation_wavelength=False
-    ) -> np.ndarray:
-        """Calculate ideal pupil function without aberrations"""
+    # compute z-indices (use fft even/odd sample convention)
+    zi = np.r_[: Nz // 2 + (Nz % 2 != 0), -Nz // 2 : 0]
 
-        if use_excitation_wavelength:
-            wavelength = self.params.excitation_wavelength
-        else:
-            wavelength = self.params.emission_wavelength
+    # compute z planes in physical units (micron) & account for RI mismatch
+    zplanes = dz * (nobj / noil) * zi
 
-        airy = jinc(
-            self.Nx,
-            self.Ny,
-            self.params.pixel_size,
-            wavelength,
-            self.params.numerical_aperture,
-        )
+    # compute optical path lengths for all defocus planes
+    # these are t_i (thickness of 'immersion' in G&L)
+    # this is actually t_i - t_i* (relative difference to design distance)
+    # so when z = 0, spherical aberration only comes from `t_s` path length
+    op_oil = zplanes[:, None, None] * noil * np.cos(theta_oil)
 
-        pupil = fft.fft2(airy)
+    # compute optical path difference: actual - design
+    opd = op_obj[None, :, :] - op_oil
 
-        pupil /= np.sqrt(np.cos(self.theta_1))
+    # apply phase aberration to pupil
+    pupil = pupil * np.exp(2 * np.pi * 1j * opd)
 
-        # clip outside of pupil
-        pupil *= self.mask
+    apsf = fft.ifft2(pupil, axes=(-1, -2))
 
-        return pupil
+    psf = np.abs(apsf) ** 2
+    psf /= psf.max()
 
-    def calculate_3d_psf(
-        self,
-        z_positions: np.ndarray,
-        zpos: float = 0.0,
-        use_excitation_wavelength=False,
-        return_amplitude_psf=False,
-    ) -> np.ndarray:
-        """
-        Calculate 3D (widefield) PSF from pupil function
+    # crop PSF
+    yind = np.r_[: Ny // 2 + (Ny % 2 != 0), -Ny // 2 : 0]
+    xind = np.r_[: Nx // 2 + (Nx % 2 != 0), -Nx // 2 : 0]
+    yi, xi = np.ix_(yind, xind)
 
-        Args:
-            z_positions: Array of z positions to calculate PSF at
-
-        Returns:
-            3D array containing PSF
-        """
-
-        if use_excitation_wavelength:
-            self._initialize_coordinates(use_excitation_wavelength=True)
-            wavelength = self.params.excitation_wavelength
-        else:
-            wavelength = self.params.emission_wavelength
-
-        k0sq = (self.params.immersion_refractive_index / wavelength) ** 2
-
-        krsq = self.R**2
-        kz = np.sqrt(k0sq - krsq + 0j)
-
-        # Add z dimension for broadcasting
-        kz = kz[np.newaxis, :, :]
-        z_positions = z_positions[:, np.newaxis, np.newaxis]
-
-        # Calculate defocus phase for all z positions at once
-        phase = np.exp(1j * 2 * np.pi * kz * z_positions)
-        pupil = self.calculate_ideal_pupil(
-            use_excitation_wavelength=use_excitation_wavelength
-        )
-
-        # calculate phase from z position
-        OPd = zpos * (
-            self.params.sample_refractive_index * np.cos(self.theta_2)
-            - self.params.immersion_refractive_index * np.cos(self.theta_1)
-        )
-
-        zphase = np.exp(1j * 2 * np.pi * OPd / wavelength)
-
-        # Apply pupil and defocus
-        defocused_pupils = (
-            pupil[np.newaxis, :, :]
-            * phase
-            * zphase[np.newaxis, :, :]
-            * self.mask
-        )
-
-        psf_amplitude = fft.ifft2(defocused_pupils, axes=(-2, -1))
-
-        if return_amplitude_psf:
-            return psf_amplitude
-        else:
-            psfi = np.abs(psf_amplitude) ** 2
-            psfi /= psfi.max()
-            return psfi
-
-    def calculate_confocal_3D_psf(
-        self,
-        z_positions: np.ndarray,
-        zpos: float = 0.0,
-    ):
-        # calculate emission amplitude PSF
-        psf_em = self.calculate_3d_psf(
-            z_positions,
-            zpos=zpos,
-            use_excitation_wavelength=False,
-            return_amplitude_psf=True,
-        )
-
-        # because of different band limit, recalculate pupil coordinates
-        self._initialize_coordinates(use_excitation_wavelength=True)
-        psf_ex = self.calculate_3d_psf(
-            z_positions,
-            zpos=zpos,
-            use_excitation_wavelength=True,
-            return_amplitude_psf=True,
-        )
-
-        # reset coordinates just in case
-        self._initialize_coordinates()
-
-        confocal_psf = np.abs(psf_ex * psf_em.conj()) ** 2
-        confocal_psf /= confocal_psf.max()
-
-        return confocal_psf
-
-
-def compute_z_planes(Nz: int, dz: float):
-    # add offset of 1 if odd
-    if Nz % 2 == 0:
-        w = int(Nz / 2)
-    else:
-        w = int((Nz - 1) / 2)
-
-    return np.r_[: w + (Nz % 2 == 0), -w:0] * dz
+    return psf[:, yi, xi]
 
 
 def jinc(Nx: int, Ny: int, dxy: float, wavelength=0.530, NA=1.4):
