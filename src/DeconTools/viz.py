@@ -8,8 +8,6 @@ from matplotlib.patches import Circle
 from matplotlib.widgets import Slider
 from PIL import Image, ImageDraw, ImageFont
 
-from .core.PSF import MicroscopeParameters
-
 labelfont = ImageFont.load_default_imagefont()
 
 
@@ -32,7 +30,7 @@ def interactive_imshow_3d(image_3d, cmap="gray", initial_slice=None, **kwargs):
         initial_slice = Nz // 2
     else:
         if not (0 <= initial_slice < Nz):
-            raise ValueError(f"initial_slice must be within [0, {Nz-1}]")
+            raise ValueError(f"initial_slice must be within [0, {Nz - 1}]")
 
     # Create the figure and the initial image plot
     fig, ax = plt.subplots(figsize=(8, 6))
@@ -72,7 +70,13 @@ def interactive_imshow_3d(image_3d, cmap="gray", initial_slice=None, **kwargs):
 
 class SimpleOrthoViewer:
     def __init__(
-        self, image_3d, cmap="gray", norm=None, lateral_to_axial_ratio=0.333
+        self,
+        image_3d,
+        cmap="gray",
+        norm=None,
+        lateral_to_axial_ratio=0.333,
+        plow=1.0,
+        phigh=99.9,
     ):
         """
         Initialize the Simple Ortho Viewer with a 3D image.
@@ -87,6 +91,8 @@ class SimpleOrthoViewer:
         self.image = image_3d
         self.cmap = cmap
         self.Nz, self.Ny, self.Nx = self.image.shape
+        self.plow = plow
+        self.phigh = phigh
         self.dyx_dz_ratio = lateral_to_axial_ratio
         # Initialize slice indices at the center
         self.z = self.Nz // 2
@@ -95,7 +101,7 @@ class SimpleOrthoViewer:
 
         if norm is None:
             # compute percentile
-            clo, chi = np.percentile(image_3d, (1.0, 99.0))
+            clo, chi = np.percentile(image_3d, (self.plow, self.phigh))
             norm = plt.Normalize(vmin=clo, vmax=chi)
 
         # Create the figure and layout using GridSpec
@@ -473,9 +479,9 @@ def create_composite_image(image, colormaps, lo=0.1, hi=99.9, gamma=0.45):
     """
     images = split_rgb_image(image)
 
-    assert len(images) == len(
-        colormaps
-    ), "number of images must match the number of colormaps"
+    assert len(images) == len(colormaps), (
+        "number of images must match the number of colormaps"
+    )
 
     # Initialize an empty RGB image
     composite = np.zeros((*images[0].shape, 3))
@@ -498,48 +504,3 @@ def create_composite_image(image, colormaps, lo=0.1, hi=99.9, gamma=0.45):
 
     # Normalize the composite
     return np.uint8(np.clip(composite, 0, 1) * 255)
-
-
-def visualize_central_otf(
-    otf: np.ndarray,
-    microscope_parameters: MicroscopeParameters,
-    ax: plt.Axes,
-    **imshow_kwargs,
-):
-    Nz, Ny, Nx = otf.shape
-    central_otf = np.abs(fft.fftshift(otf[0]))
-
-    # compute frequency spacing
-    fy = fft.fftshift(fft.fftfreq(Ny, d=microscope_parameters.pixel_size))
-    fx = fft.fftshift(fft.fftfreq(Nx, d=microscope_parameters.pixel_size))
-
-    ax.imshow(
-        central_otf,
-        **imshow_kwargs,
-        extent=[fx.min(), fx.max(), fy.min(), fy.max()],
-    )
-
-    # superimpose band limit
-    bandlimit = (
-        microscope_parameters.numerical_aperture
-        / microscope_parameters.emission_wavelength
-    )
-
-    bcircle = Circle(
-        (0, 0),
-        radius=2 * bandlimit,
-        color="red",
-        linestyle="dashed",
-        linewidth=1.5,
-        fill=None,
-    )
-    ax.text(
-        2 * bandlimit * 0.5,
-        2 * bandlimit * 0.5,
-        "2NA/$\lambda_{em}$",
-        color="red",
-        fontsize=12,
-    )
-    ax.add_artist(bcircle)
-    ax.set_xlabel("spatial frequency, $\mu m^{-1}$")
-    ax.set_ylabel("spatial frequency, $\mu m^{-1}$")

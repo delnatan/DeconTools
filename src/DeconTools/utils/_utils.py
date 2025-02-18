@@ -16,3 +16,15 @@ def move_to_torch_device(
         listarrs.append(torch.from_numpy(arr).to(dev))
 
     return listarrs
+
+
+def clear_cache(device):
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    elif device.type == "mps":
+        # MPS doesn't have an explicit cache clearing mechanism
+        # but we can try to force garbage collection
+        import gc
+
+        gc.collect()
+        torch.mps.empty_cache()  # Added in newer PyTorch versions

@@ -48,23 +48,24 @@ def perfft(img: np.ndarray, inverse: bool = True) -> np.ndarray:
         # each slice(None) creates slice(None, None, None)
         first_idx = [slice(None)] * ndim
         last_idx = [slice(None)] * ndim
+
         first_idx[dim] = 0
         last_idx[dim] = -1
-        first_idx = tuple(first_idx)
-        last_idx = tuple(last_idx)
 
-        boundary_diff = img[last_idx] - img[first_idx]
+        # compute boundary difference
+        w = img[tuple(last_idx)] - img[tuple(first_idx)]
 
         if dim == 0:
-            s[first_idx] = boundary_diff
-            s[last_idx] = -boundary_diff
+            s[tuple(first_idx)] = w
+            s[tuple(last_idx)] = -w
         else:
-            s[first_idx] += boundary_diff
-            s[last_idx] -= boundary_diff
+            s[tuple(first_idx)] += w
+            s[tuple(last_idx)] += -w
 
-    freq_coords = [2 * np.pi * fft.fftfreq(s) for s in img.shape]
+    freq_coords = [2 * np.pi * fft.fftfreq(dim_size) for dim_size in img.shape]
 
     denom = np.zeros_like(img)
+
     # compute laplace solution in frequency space
     # ndim * (∑(cos(2π*k/N)) - 2.0)
     for dim, freq in enumerate(freq_coords):
@@ -79,12 +80,14 @@ def perfft(img: np.ndarray, inverse: bool = True) -> np.ndarray:
     origin_idx = tuple(0 for _ in range(img.ndim))
 
     denom[origin_idx] = 1.0
-    S = fft.fftn(s) / np.maximum(denom, 1e-10)
+    S = fft.fftn(s) / denom
     S[origin_idx] = 0.0
 
     P = fft.fftn(img) - S
 
     if inverse:
-        return fft.ifftn(P)
+        smooth = fft.ifftn(S).real
+        periodic = fft.ifftn(P).real
+        return periodic, smooth
     else:
-        return P
+        return P, S
