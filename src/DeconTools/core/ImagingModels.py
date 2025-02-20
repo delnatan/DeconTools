@@ -117,12 +117,12 @@ class CarringtonModel:
         padded_psf = self.psf_padder.forward(psf)
 
         self.otf = torch.fft.rfftn(padded_psf)
-        self.icf = calculate_duchon_filter(
+        sigma = calculate_duchon_filter(
             self.padded_object_shape, self.duchon_cutoff
         )
-        self.icf = self.icf.to(self.device)
+        self.icf = (sigma**2).to(self.device)
 
-        del psf
+        del psf, sigma
         gc.collect()
 
         self.adjoint_iscale = math.prod(self.padded_object_shape) / math.prod(
