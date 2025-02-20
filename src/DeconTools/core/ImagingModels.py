@@ -23,6 +23,21 @@ def get_device() -> torch.device:
         return torch.device("cpu")
 
 
+def calculate_duchon_filter(real_tensor_shape: tuple[int, ...], cutoff: float):
+    ndim = len(real_tensor_shape)
+    eps = torch.finfo(torch.float32).eps
+    freq_coords = tuple(
+        torch.fft.fftfreq(s) if i < ndim else torch.fft.rfftfreq(s)
+        for i, s in enumerate(real_tensor_shape, start=1)
+    )
+
+    K = torch.meshgrid(*freq_coords, indexing="ij")
+    R = torch.sqrt(sum([k * k for k in K]))
+    arg = torch.pi * R / cutoff + eps
+    sigma = torch.sin(arg) / arg
+    return sigma
+
+
 class CarringtonModel:
     def __init__(
         self,
@@ -30,11 +45,13 @@ class CarringtonModel:
         zoom_factor: float | tuple[float, ...],
         optical_params: dict[str, Any],
         device_str: str = "cpu",
+        duchon_cutoff: float = 0.333,
     ):
         self.data_shape = data_shape
         self.ndim = len(data_shape)
         self.optical_params = optical_params
         self.device = torch.device(device_str)
+        self.duchon_cutoff = duchon_cutoff
 
         if isinstance(zoom_factor, float):
             zoom_factor = (zoom_factor,) * len(data_shape)
@@ -100,6 +117,10 @@ class CarringtonModel:
         padded_psf = self.psf_padder.forward(psf)
 
         self.otf = torch.fft.rfftn(padded_psf)
+        self.icf = calculate_duchon_filter(
+            self.padded_object_shape, self.duchon_cutoff
+        )
+        self.icf = self.icf.to(self.device)
 
         del psf
         gc.collect()
@@ -111,7 +132,7 @@ class CarringtonModel:
     def forward(self, x: torch.Tensor):
         # input is in padded object space
         ft_x = torch.fft.rfftn(x)
-        torch.mul(ft_x, self.otf, out=ft_x)
+        torch.mul(ft_x, self.otf * self.icf, out=ft_x)
         # crop to padded data space
         ft_x = self.upsample_padder.adjoint(ft_x)
         x = torch.fft.irfftn(ft_x, s=self.padded_data_shape)
@@ -124,7 +145,7 @@ class CarringtonModel:
         ft_x = torch.fft.rfftn(x)
         # move to padded object space
         ft_x = self.upsample_padder.forward(ft_x)
-        torch.mul(ft_x, self.otf.conj(), out=ft_x)
+        torch.mul(ft_x, self.icf.conj() * self.otf.conj(), out=ft_x)
         # scale fourier coefficient to preserve total energy
         return torch.fft.irfftn(
             ft_x * self.adjoint_iscale, s=self.padded_object_shape
