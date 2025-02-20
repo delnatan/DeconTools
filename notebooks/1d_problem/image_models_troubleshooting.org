@@ -1,0 +1,89 @@
+#+PROPERTY: header-args:jupyter-python :session py
+#+PROPERTY: header-args:jupyter-python+ :async yes
+#+PROPERTY: header-args:jupyter-python+ :eval never-export
+#+PROPERTY: header-args:jupyter-python+ :kernel torch
+#+TITLE: Imaging model troubleshooting
+
+#+begin_src jupyter-python
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import torch.fft as tfft
+import scipy.fft as sfft
+import DeconTools as dt
+import toy_problem as tp
+
+plt.style.use("dark_background")
+get_ipython().run_line_magic("load_ext", "autoreload")
+get_ipython().run_line_magic("autoreload", "2")
+#+end_src
+
+#+RESULTS:
+
+
+I've been having some problems with adjoint model! in this note, I'm exploring this phenomena in 1 dimension to help me debug what's really going on.
+
+#+begin_src jupyter-python
+pad = 40
+zoom = 4.0
+zoom_dxy = 0.1043 / zoom
+
+NA = 1.40
+λ = 0.530
+N = 256
+zoom_pad = int(pad * zoom)
+N_zoom = int(zoom * N + 2 * zoom_pad)
+
+# compute super-sampled PSF
+psf = tp.airy_1d(N_zoom, zoom_dxy, wavelength=λ, NA=NA)
+psf /= psf.sum()
+
+otf = sfft.rfft(psf)
+ft_icf = dt.core.filters.gaussian_fourier_filter((N_zoom,), 1.2)
+
+freq = sfft.rfftfreq(N_zoom, d=zoom_dxy)
+
+# look at the frequency responsses of the otf and the ICF
+plt.plot(freq, np.abs(otf))
+plt.plot(freq, ft_icf.real, 'r-')
+
+
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+| <matplotlib.lines.Line2D | at | 0x14b107590> |
+[[./.ob-jupyter/b625344ca195e38a5ea53529f6a9d39db6398e8e.png]]
+:END:
+
+#+begin_src jupyter-python
+extended_object_ft_size = N_zoom // 2 + 1
+Npadded = (N + 2 * pad)
+data_ft_indices = (sfft.rfftfreq(Npadded) * Npadded).astype(int)
+
+# do adjoint operation on mask of ones
+mask = np.ones(N, dtype=np.float32) # data-space
+
+# pad data
+padded_mask = np.zeros(N + 2 * pad, dtype=np.float32)
+padded_mask[pad:-pad] = mask
+
+# fourier padding
+ft_padded_mask = sfft.rfft(padded_mask)
+ft_extended_object_mask = np.zeros(extended_object_ft_size, dtype=np.complex64)
+ft_extended_object_mask[data_ft_indices] = ft_padded_mask[data_ft_indices]
+
+# multiply by otf
+ft_x = ft_extended_object_mask * np.conj(otf) * np.conj(ft_icf)
+scale = N_zoom / Npadded
+x = sfft.irfft(ft_x * scale, n=N_zoom)
+
+plt.plot(np.arange(N_zoom), x)
+plt.plot(np.arange(Npadded)*zoom, padded_mask, 'w--', zorder=-1, lw=0.7)
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+| <matplotlib.lines.Line2D | at | 0x14b1a0c10> |
+[[./.ob-jupyter/bd886ffafb29447566316923a1c17bf93c5596cf.png]]
+:END:
