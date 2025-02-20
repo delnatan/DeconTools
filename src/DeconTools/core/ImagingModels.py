@@ -137,7 +137,7 @@ class CarringtonModel:
             self.padded_object_shape, self.icf_sigma
         )
 
-        self.icf = icf.to(device)
+        self.icf = icf.to(self.device)
 
         del psf
         gc.collect()
