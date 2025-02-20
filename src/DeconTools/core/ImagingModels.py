@@ -38,20 +38,35 @@ def calculate_duchon_filter(real_tensor_shape: tuple[int, ...], cutoff: float):
     return sigma
 
 
+def calculate_gaussian_filter(
+    real_tensor_shape: tuple[int, ...], sigma: tuple[float, ...]
+):
+    ndim = len(real_tensor_shape)
+    eps = torch.finfo(torch.float32).eps
+    freq_coords = tuple(
+        torch.fft.fftfreq(s) if i < ndim else torch.fft.rfftfreq(s)
+        for i, s in enumerate(real_tensor_shape, start=1)
+    )
+    freq_mesh = torch.meshgrid(*freq_coords, indexing="ij")
+    # Sum of squared frequency components weighted by sigma
+    freq_sum = sum((s * f) ** 2 for s, f in zip(sigma, freq_mesh))
+    return torch.exp(-2 * torch.pi**2 * freq_sum)
+
+
 class CarringtonModel:
     def __init__(
         self,
         data_shape,
         zoom_factor: float | tuple[float, ...],
         optical_params: dict[str, Any],
+        icf_sigma: tuple[float, ...],
         device_str: str = "cpu",
-        duchon_cutoff: float = 0.333,
     ):
         self.data_shape = data_shape
         self.ndim = len(data_shape)
         self.optical_params = optical_params
         self.device = torch.device(device_str)
-        self.duchon_cutoff = duchon_cutoff
+        self.icf_sigma = icf_sigma
 
         if isinstance(zoom_factor, float):
             zoom_factor = (zoom_factor,) * len(data_shape)
@@ -117,12 +132,14 @@ class CarringtonModel:
         padded_psf = self.psf_padder.forward(psf)
 
         self.otf = torch.fft.rfftn(padded_psf)
-        sigma = calculate_duchon_filter(
-            self.padded_object_shape, self.duchon_cutoff
-        )
-        self.icf = (sigma**2).to(self.device)
 
-        del psf, sigma
+        icf = calculate_gaussian_filter(
+            self.padded_object_shape, self.icf_sigma
+        )
+
+        self.icf = icf.to(device)
+
+        del psf
         gc.collect()
 
         self.adjoint_iscale = math.prod(self.padded_object_shape) / math.prod(
